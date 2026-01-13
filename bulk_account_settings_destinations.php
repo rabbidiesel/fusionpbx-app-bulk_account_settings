@@ -17,7 +17,7 @@
 
 	The Initial Developer of the Original Code is
 	Mark J Crane <markjcrane@fusionpbx.com>
-	Portions created by the Initial Developer are Copyright (C) 2008-2025
+	Portions created by the Initial Developer are Copyright (C) 2008-2026
 	the Initial Developer. All Rights Reserved.
 
 	Contributor(s):
@@ -43,7 +43,6 @@
 	$destination_options[] = 'destination_actions';
 	$destination_options[] = 'destination_hold_music';
 	$destination_options[] = 'destination_record';
-	$destination_options[] = 'destination_accountcode';
 	$destination_options[] = 'destination_cid_name_prefix';
 	$destination_options[] = 'destination_enabled';
 
@@ -120,6 +119,7 @@
 	$sql .= "destination_cid_name_prefix, ";
 	$sql .= "destination_hold_music, ";
 	$sql .= "destination_record, ";
+	$sql .= "destination_actions, ";
 	$sql .= "destination_enabled ";
 	$sql .= "FROM v_destinations ";
 	$sql .= "WHERE domain_uuid = :domain_uuid ";
@@ -136,6 +136,53 @@
 	$destinations = $database->select($sql, $parameters, 'all');
 	if ($destinations === false) {
 		$destinations = [];
+	}
+
+//get the destination select list for action name display
+	$destination_obj = new destinations;
+	$destination_array = $destination_obj->all('dialplan');
+
+//function to return the action names in the order defined
+	function action_name($destination_array, $destination_actions, $settings) {
+		$actions = [];
+		if (!empty($destination_array) && is_array($destination_array)) {
+			if (!empty($destination_actions) && is_array($destination_actions)) {
+				foreach ($destination_actions as $destination_action) {
+					if (!empty($destination_action)) {
+						foreach ($destination_array as $group => $row) {
+							if (!empty($row) && is_array($row)) {
+								foreach ($row as $key => $value) {
+									if ($destination_action == $value) {
+										if ($group == 'other') {
+											if (file_exists(dirname(__DIR__, 2)."/app/dialplans/app_languages.php")) {
+												$language2 = new text;
+												$text2 = $language2->get($settings->get('domain', 'language', 'en-us'), 'app/dialplans');
+											}
+											$actions[] = trim($text2['title-other'].' &#x203A; '.$text2['option-'.str_replace('&lowbar;','_',$key)]);
+										}
+										else {
+											// For extensions, just show the extension number and description (the $key value)
+											// For other apps, show the app name with the key
+											if ($group == 'extensions') {
+												$actions[] = trim($key);
+											}
+											else {
+												if (file_exists(dirname(__DIR__, 2)."/app/".$group."/app_languages.php")) {
+													$language3 = new text;
+													$text3 = $language3->get($settings->get('domain', 'language', 'en-us'), 'app/'.$group);
+													$actions[] = trim($text3['title-'.$group].' &#x203A; '.$key);
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		return $actions;
 	}
 
 //additional includes
@@ -205,10 +252,7 @@
 		}
 
 		//text input
-		if (
-			$option_selected == 'destination_accountcode' ||
-			$option_selected == 'destination_cid_name_prefix'
-			) {
+		if ($option_selected == 'destination_cid_name_prefix') {
 			echo "		<input class='formfld' type='text' name='new_setting' maxlength='255' value=''>\n";
 		}
 
@@ -264,13 +308,10 @@
 		echo "<th style='width: 30px; text-align: center; padding: 0px;'><input type='checkbox' id='chk_all' onchange=\"(this.checked) ? check('all') : check('none');\"></th>";
 	}
 	echo th_order_by('destination_number', $text['label-destination_number'], $order_by, $order, null, null, $param);
-	if (!empty($option_selected) && $option_selected != 'destination_accountcode') {
-		echo th_order_by('destination_accountcode', $text['label-accountcode'], $order_by, $order, null, null, $param);
-	}
 	if (!empty($option_selected) && $option_selected != 'destination_enabled') {
 		echo th_order_by('destination_enabled', $text['label-enabled'], $order_by, $order, null, null, $param);
 	}
-	if (!empty($option_selected) && !in_array($option_selected, ['destination_accountcode', 'destination_enabled', 'destination_description'])) {
+	if (!empty($option_selected) && $option_selected != 'destination_description') {
 		echo th_order_by($option_selected, $text["label-".$option_selected.""], $order_by, $order, null, null, $param);
 	}
 	echo th_order_by('destination_description', $text['label-description'], $order_by, $order, null, null, $param);
@@ -286,14 +327,49 @@
 			echo "	</td>";
 			$dest_ids[] = 'checkbox_'.$row['destination_uuid'];
 			echo "	<td><a href='".$list_row_url."'>".escape(format_phone($row['destination_number']))."</a></td>\n";
-			if (!empty($option_selected) && $option_selected != 'destination_accountcode') {
-				echo "	<td>".escape($row['destination_accountcode'])."&nbsp;</td>\n";
-			}
 			if (!empty($option_selected) && $option_selected != 'destination_enabled') {
 				echo "	<td>".escape($text['label-'.($row['destination_enabled'] ?? 'false')])."&nbsp;</td>\n";
 			}
-			if (!empty($option_selected) && !in_array($option_selected, ['destination_accountcode', 'destination_enabled', 'destination_description'])) {
-				echo "	<td>".escape($row[$option_selected] ?? '')."&nbsp;</td>\n";
+			if (!empty($option_selected) && $option_selected != 'destination_description') {
+				$value = $row[$option_selected] ?? '';
+				// Convert boolean-like values to true/false labels for display
+				if ($option_selected == 'destination_record' || $option_selected == 'destination_enabled') {
+					if ($value === '1' || $value === 'true' || $value === true) {
+						$value = $text['label-true'];
+					} elseif ($value === '0' || $value === 'false' || $value === false || $value === '' || $value === null) {
+						$value = $text['label-false'];
+					}
+				}
+				// Clean up hold music display - show just the name without local_stream:// prefix
+				if ($option_selected == 'destination_hold_music') {
+					if (empty($value) || $value === 'silence') {
+						$value = $text['label-none'] ?? 'None';
+					} elseif (strpos($value, 'local_stream://') === 0) {
+						$value = str_replace('local_stream://', '', $value);
+					}
+				}
+				// Parse destination_actions JSON and display readable names
+				if ($option_selected == 'destination_actions') {
+					if (!empty($value)) {
+						$actions_json = json_decode($value, true);
+						if (!empty($actions_json) && is_array($actions_json)) {
+							// Build the app:data format that action_name expects
+							$destination_app_data = [];
+							foreach ($actions_json as $action) {
+								if (!empty($action['destination_app']) && !empty($action['destination_data'])) {
+									$destination_app_data[] = $action['destination_app'].':'.$action['destination_data'];
+								}
+							}
+							// Use action_name function to get readable names
+							$action_names = action_name($destination_array, $destination_app_data, $settings);
+							$value = (!empty($action_names)) ? implode(', ', $action_names) : '';
+						}
+					}
+					if (empty($value)) {
+						$value = $text['label-none'] ?? 'None';
+					}
+				}
+				echo "	<td>".escape($value)."&nbsp;</td>\n";
 			}
 			echo "	<td>".escape($row['destination_description'])."&nbsp;</td>\n";
 			echo "</tr>\n";
