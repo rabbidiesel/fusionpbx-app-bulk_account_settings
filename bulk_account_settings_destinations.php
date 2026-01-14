@@ -17,9 +17,11 @@
 
 	The Initial Developer of the Original Code is
 	Mark J Crane <markjcrane@fusionpbx.com>
-	Portions created by the Initial Developer are Copyright (C) 2008-2026
+	Portions created by the Initial Developer are Copyright (C) 2008-2025
 	the Initial Developer. All Rights Reserved.
 
+	Contributor(s):
+	KonradSC <konrd@yahoo.com>
 */
 
 //includes files
@@ -156,19 +158,19 @@
 												$language2 = new text;
 												$text2 = $language2->get($settings->get('domain', 'language', 'en-us'), 'app/dialplans');
 											}
-											$actions[] = trim($text2['title-other'].' &#x203A; '.$text2['option-'.str_replace('&lowbar;','_',$key)]);
+											$actions[] = $text2['title-other'].' › '.$text2['option-'.str_replace('&lowbar;','_',$key)];
 										}
 										else {
 											// For extensions, just show the extension number and description (the $key value)
 											// For other apps, show the app name with the key
 											if ($group == 'extensions') {
-												$actions[] = trim($key);
+												$actions[] = $key;
 											}
 											else {
 												if (file_exists(dirname(__DIR__, 2)."/app/".$group."/app_languages.php")) {
 													$language3 = new text;
 													$text3 = $language3->get($settings->get('domain', 'language', 'en-us'), 'app/'.$group);
-													$actions[] = trim($text3['title-'.$group].' &#x203A; '.$key);
+													$actions[] = $text3['title-'.$group].' › '.$key;
 												}
 											}
 										}
@@ -306,9 +308,6 @@
 		echo "<th style='width: 30px; text-align: center; padding: 0px;'><input type='checkbox' id='chk_all' onchange=\"(this.checked) ? check('all') : check('none');\"></th>";
 	}
 	echo th_order_by('destination_number', $text['label-destination_number'], $order_by, $order, null, null, $param);
-	if (!empty($option_selected) && $option_selected != 'destination_enabled') {
-		echo th_order_by('destination_enabled', $text['label-enabled'], $order_by, $order, null, null, $param);
-	}
 	if (!empty($option_selected) && $option_selected != 'destination_description') {
 		echo th_order_by($option_selected, $text["label-".$option_selected.""], $order_by, $order, null, null, $param);
 	}
@@ -325,11 +324,15 @@
 			echo "	</td>";
 			$dest_ids[] = 'checkbox_'.$row['destination_uuid'];
 			echo "	<td><a href='".$list_row_url."'>".escape(format_phone($row['destination_number']))."</a></td>\n";
-			if (!empty($option_selected) && $option_selected != 'destination_enabled') {
-				echo "	<td>".escape($text['label-'.($row['destination_enabled'] ?? 'false')])."&nbsp;</td>\n";
-			}
 			if (!empty($option_selected) && $option_selected != 'destination_description') {
 				$value = $row[$option_selected] ?? '';
+				
+				// DEBUG: Show raw value for destination_actions
+				if ($option_selected == 'destination_actions' && !empty($value)) {
+					// Uncomment this line temporarily to see the raw data:
+					// echo "<!-- RAW DATA: " . htmlspecialchars($value) . " -->";
+				}
+				
 				// Convert boolean-like values to true/false labels for display
 				if ($option_selected == 'destination_record' || $option_selected == 'destination_enabled') {
 					if ($value === '1' || $value === 'true' || $value === true) {
@@ -349,24 +352,139 @@
 				// Parse destination_actions JSON and display readable names
 				if ($option_selected == 'destination_actions') {
 					if (!empty($value)) {
+						// Decode the JSON
 						$actions_json = json_decode($value, true);
-						if (!empty($actions_json) && is_array($actions_json)) {
-							// Build the app:data format that action_name expects
-							$destination_app_data = [];
+						
+						if (json_last_error() === JSON_ERROR_NONE && !empty($actions_json) && is_array($actions_json)) {
+							$action_display = [];
 							foreach ($actions_json as $action) {
-								if (!empty($action['destination_app']) && !empty($action['destination_data'])) {
-									$destination_app_data[] = $action['destination_app'].':'.$action['destination_data'];
+								if (!empty($action['destination_app'])) {
+									$app = $action['destination_app'];
+									$data = $action['destination_data'] ?? '';
+									
+									// Handle each action type
+									if ($app === 'transfer' || $app === 'bridge') {
+										// Check for voicemail first (*99 pattern)
+										if (preg_match('/^\*99(\d+)/', $data, $matches)) {
+											$ext_number = $matches[1];
+											// Look up extension description
+											$sql_ext = "SELECT description FROM v_extensions WHERE domain_uuid = :domain_uuid AND extension = :extension LIMIT 1";
+											$ext_result = $database->select($sql_ext, ['domain_uuid' => $domain_uuid, 'extension' => $ext_number], 'row');
+											
+											if (!empty($ext_result['description'])) {
+												$action_display[] = $ext_number . ' ' . $ext_result['description'] . ' (Voicemail)';
+											} else {
+												$action_display[] = $ext_number . ' (Voicemail)';
+											}
+										}
+										// Check for *98 check voicemail
+										elseif (preg_match('/^\*98\s+XML/i', $data)) {
+											$action_display[] = 'Check Voicemail';
+										}
+										// Check for *732 record
+										elseif (preg_match('/^\*732/i', $data)) {
+											$action_display[] = 'Record';
+										}
+										// Check for *411 company directory
+										elseif (strpos($data, '*411') !== false) {
+											$action_display[] = 'Company Directory';
+										}
+										// Regular transfer - try to parse extension
+										else {
+											$transfer_dest = $data;
+											// Clean up common prefixes
+											$transfer_dest = preg_replace('/\s*XML.*$/i', '', $transfer_dest);
+											$transfer_dest = preg_replace('/sofia\/internal\//i', '', $transfer_dest);
+											$transfer_dest = preg_replace('/@.*$/', '', $transfer_dest);
+											$transfer_dest = trim($transfer_dest);
+											
+											// If it's numeric, look up extension description
+											if (is_numeric($transfer_dest)) {
+												$sql_ext = "SELECT description FROM v_extensions WHERE domain_uuid = :domain_uuid AND extension = :extension LIMIT 1";
+												$ext_result = $database->select($sql_ext, ['domain_uuid' => $domain_uuid, 'extension' => $transfer_dest], 'row');
+												
+												if (!empty($ext_result['description'])) {
+													$action_display[] = $transfer_dest . ' ' . $ext_result['description'];
+												} else {
+													$action_display[] = $transfer_dest;
+												}
+											} else {
+												$action_display[] = $transfer_dest;
+											}
+										}
+									}
+									elseif ($app === 'voicemail') {
+										// Direct voicemail app (legacy format)
+										$ext_number = '';
+										if (preg_match('/\*99(\d+)/', $data, $matches)) {
+											$ext_number = $matches[1];
+										} elseif (preg_match('/^(\d+)\s/', $data, $matches)) {
+											$ext_number = $matches[1];
+										}
+										
+										if (!empty($ext_number)) {
+											$sql_ext = "SELECT description FROM v_extensions WHERE domain_uuid = :domain_uuid AND extension = :extension LIMIT 1";
+											$ext_result = $database->select($sql_ext, ['domain_uuid' => $domain_uuid, 'extension' => $ext_number], 'row');
+											
+											if (!empty($ext_result['description'])) {
+												$action_display[] = $ext_number . ' ' . $ext_result['description'] . ' (Voicemail)';
+											} else {
+												$action_display[] = $ext_number . ' (Voicemail)';
+											}
+										} else {
+											$action_display[] = 'Voicemail';
+										}
+									}
+									elseif ($app === 'playback' || $app === 'play') {
+										// For playback/tones, use action_name to get the proper tone name
+										if (!empty($data)) {
+											$destination_app_data = [$app.':'.$data];
+											$action_names = action_name($destination_array, $destination_app_data, $settings);
+											if (!empty($action_names)) {
+												// Use the tone name from action_name
+												$action_display[] = $action_names[0];
+											} else {
+												// Fallback: try to extract from path or show filename
+												if (preg_match('/\$\{([^}]+)\}/i', $data, $matches)) {
+													$action_display[] = $matches[1];
+												} else {
+													$basename = basename($data);
+													$action_display[] = $basename;
+												}
+											}
+										} else {
+											$action_display[] = 'Playback';
+										}
+									}
+									elseif ($app === 'hangup') {
+										$action_display[] = 'Hangup';
+									}
+									elseif ($app === 'answer') {
+										$action_display[] = 'Answer';
+									}
+									elseif ($app === 'record' || $app === 'record_session') {
+										$action_display[] = 'Record';
+									}
+									elseif ($app === 'check_voicemail') {
+										$action_display[] = 'Check Voicemail';
+									}
+									elseif ($app === 'directory' || $app === 'company_directory') {
+										$action_display[] = 'Company Directory';
+									}
+									else {
+										// Default: format the app name nicely
+										$action_display[] = ucwords(str_replace('_', ' ', $app));
+									}
 								}
 							}
-							// Use action_name function to get readable names
-							$action_names = action_name($destination_array, $destination_app_data, $settings);
-							$value = (!empty($action_names)) ? implode(', ', $action_names) : '';
+							$value = (!empty($action_display)) ? implode(', ', $action_display) : '';
 						}
 					}
 					if (empty($value)) {
 						$value = $text['label-none'] ?? 'None';
 					}
 				}
+				// Output the value
 				echo "	<td>".escape($value)."&nbsp;</td>\n";
 			}
 			echo "	<td>".escape($row['destination_description'])."&nbsp;</td>\n";
