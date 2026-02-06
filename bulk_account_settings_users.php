@@ -59,6 +59,12 @@
 	$order = preg_replace('#[^a-zA-Z0-9_]#', '', $_GET["order"] ?? '');
 	$option_selected = preg_replace('#[^a-zA-Z0-9_]#', '', $_GET["option_selected"] ?? '');
 
+//show all domains (superadmin only)
+	$show_all = false;
+	if (if_group("superadmin") && isset($_GET["show_all"]) && $_GET["show_all"] == 'true') {
+		$show_all = true;
+	}
+
 //handle search term
 	$parameters = [];
 	$sql_mod = '';
@@ -79,15 +85,26 @@
 		$order = 'ASC';
 	}
 
+//build domain filter
+	$sql_domain = '';
+	if ($show_all) {
+		//no domain filter - show all domains
+	}
+	else {
+		$sql_domain = "domain_uuid = :domain_uuid";
+	}
+
 //get total extension count from the database
-	$sql = "select count(user_uuid) as num_rows from v_users where domain_uuid = :domain_uuid ".$sql_mod." ";
-	$parameters['domain_uuid'] = $domain_uuid;
+	$sql = "select count(user_uuid) as num_rows from v_users where ".($show_all ? "1=1" : "domain_uuid = :domain_uuid")." ".$sql_mod." ";
+	if (!$show_all) {
+		$parameters['domain_uuid'] = $domain_uuid;
+	}
 	$result = $database->select($sql, $parameters, 'column');
 	$total_users = !empty($result) ? intval($result) : 0;
 
 //prepare to page the results
 	$rows_per_page = intval($settings->get('domain', 'paging', 50));
-	$param = (!empty($search) ? "&search=".$search : '').(!empty($option_selected) ? "&option_selected=".$option_selected : '');
+	$param = (!empty($search) ? "&search=".$search : '').(!empty($option_selected) ? "&option_selected=".$option_selected : '').($show_all ? "&show_all=true" : '');
 	$page = intval(preg_replace('#[^0-9]#', '', $_GET['page'] ?? 0));
 	list($paging_controls, $rows_per_page) = paging($total_users, $param, $rows_per_page);
 	list($paging_controls_mini, $rows_per_page) = paging($total_users, $param, $rows_per_page, true);
@@ -96,14 +113,21 @@
 //get all the users from the database
 	$parameters = [];
 	$sql  = "select";
-	$sql .= "	username, ";
-	$sql .= "	user_uuid, ";
-	$sql .= "	user_status, ";
-	$sql .= "	user_enabled ";
+	$sql .= "	u.username, ";
+	$sql .= "	u.user_uuid, ";
+	$sql .= "	u.user_status, ";
+	$sql .= "	u.user_enabled, ";
+	$sql .= "	u.domain_uuid ";
 	$sql .= "from ";
-	$sql .= "	v_users ";
+	$sql .= "	v_users as u ";
 	$sql .= "where ";
-	$sql .= "	domain_uuid = :domain_uuid ";
+	if ($show_all) {
+		$sql .= "	1=1 ";
+	}
+	else {
+		$sql .= "	u.domain_uuid = :domain_uuid ";
+		$parameters['domain_uuid'] = $domain_uuid;
+	}
 	if (!empty($sql_mod)) {
 		$sql .= $sql_mod; //add search mod from above
 		$parameters['search'] = '%'.$search.'%';
@@ -112,10 +136,17 @@
 		$sql .= "order by ".$order_by." ".$order." ";
 		$sql .= "limit ".$rows_per_page." offset ".$offset;
 	}
-	$parameters['domain_uuid'] = $domain_uuid;
 	$users = $database->select($sql, $parameters, 'all');
 	if (empty($users)) {
 		$users = [];
+	}
+
+//build domain name lookup
+	$domain_names = [];
+	if ($show_all && !empty($_SESSION['domains'])) {
+		foreach ($_SESSION['domains'] as $d_uuid => $d_info) {
+			$domain_names[$d_uuid] = $d_info['domain_name'] ?? $d_uuid;
+		}
 	}
 
 //get all the users' groups from the database
@@ -127,11 +158,16 @@
 	$sql .= "	v_groups as g ";
 	$sql .= "where ";
 	$sql .= "	ug.group_uuid = g.group_uuid ";
-	$sql .= "	and ug.domain_uuid = :domain_uuid ";
+	if ($show_all) {
+		//no domain filter
+	}
+	else {
+		$sql .= "	and ug.domain_uuid = :domain_uuid ";
+		$parameters['domain_uuid'] = $domain_uuid;
+	}
 	$sql .= "order by ";
 	$sql .= "	g.domain_uuid desc, ";
 	$sql .= "	g.group_name asc ";
-	$parameters['domain_uuid'] = $domain_uuid;
 	$result = $database->select($sql, $parameters, 'all');
 	if (!empty($result)) {
 		foreach($result as $row) {
@@ -151,8 +187,13 @@
 	$sql .= "	v_user_settings as us ";
 	$sql .= "where ";
 	$sql .= "	us.user_setting_subcategory = 'time_zone' ";
-	$sql .= "	and us.domain_uuid = :domain_uuid ";
-	$parameters['domain_uuid'] = $domain_uuid;
+	if ($show_all) {
+		//no domain filter
+	}
+	else {
+		$sql .= "	and us.domain_uuid = :domain_uuid ";
+		$parameters['domain_uuid'] = $domain_uuid;
+	}
 	$result = $database->select($sql, $parameters, 'all');
 	if (!empty($result)) {
 		foreach($result as $row) {
@@ -252,8 +293,16 @@
 	echo "	<div class='actions'>\n";
 	echo "		<form method='get' action=''>\n";
 	echo button::create(['type'=>'button','label'=>$text['button-back'],'icon'=>$settings->get('theme', 'button_icon_back'),'id'=>'btn_back','style'=>'margin-right: 15px; position: sticky; z-index: 5;','onclick'=>"window.location='bulk_account_settings.php'"]);
+	if (if_group("superadmin")) {
+		$show_all_url = 'bulk_account_settings_users.php?show_all='.($show_all ? 'false' : 'true').(!empty($option_selected) ? '&option_selected='.$option_selected : '').(!empty($search) ? '&search='.$search : '');
+		echo button::create(['type'=>'button','label'=>($show_all ? 'This Domain' : 'Show All'),'icon'=>'fas fa-globe','style'=>'margin-right: 15px;'.($show_all ? ' color: #fff; background-color: #5082ca;' : ''),'onclick'=>"window.location='".$show_all_url."'"]);
+	}
 	echo 			"<input type='text' class='txt list-search' name='search' id='search' style='margin-left: 0 !important;' value=\"".escape($search)."\" placeholder=\"".$text['label-search']."\" onkeydown=''>";
 	echo "			<input type='hidden' class='txt' style='width: 150px' name='option_selected' id='option_selected' value='".escape($option_selected)."'>";
+	//show all toggle (superadmin only)
+	if (if_group("superadmin")) {
+		echo "		<input type='hidden' name='show_all' value='".($show_all ? "true" : "false")."'>";
+	}
 	echo "			<form id='form_search' class='inline' method='get'>\n";
 	echo button::create(['label'=>$text['button-search'],'icon'=>$settings->get('theme', 'button_icon_search'),'type'=>'submit','id'=>'btn_search']);
 	if (!empty($paging_controls_mini)) {
@@ -275,6 +324,9 @@
 	echo "		</div>\n";
 	echo "		<div class='field'>\n";
 	echo "			<form name='frm' method='get' id='option_selected'>\n";
+	if ($show_all) {
+		echo "		<input type='hidden' name='show_all' value='true'>\n";
+	}
 	echo "			<select class='formfld' name='option_selected' onchange=\"this.form.submit();\">\n";
 	echo "				<option value=''></option>\n";
 	foreach ($user_options as $option) {
@@ -295,6 +347,9 @@
 
 		echo "			<form name='users' method='post' action='bulk_account_settings_users_update.php'>\n";
 		echo "			<input class='formfld' type='hidden' name='option_selected' maxlength='255' value=\"".escape($option_selected)."\">\n";
+		if ($show_all) {
+			echo "		<input type='hidden' name='show_all' value='true'>\n";
+		}
 
 		//password
 		if ($option_selected == 'password') {
@@ -377,26 +432,8 @@
 		echo "</div>\n";
 
 		echo "<div style='display: flex; justify-content: flex-end; padding-top: 15px; margin-left: 20px; white-space: nowrap;'>\n";
-		echo button::create(['label'=>$text['button-reset'],'icon'=>$settings->get('theme', 'button_icon_reset'),'type'=>'button','style'=>($option_selected == 'group' ? "margin-right: 15px;" : null),'link'=>'bulk_account_settings_users.php']);
+		echo button::create(['label'=>$text['button-reset'],'icon'=>$settings->get('theme', 'button_icon_reset'),'type'=>'button','style'=>($option_selected == 'group' ? "margin-right: 15px;" : null),'link'=>'bulk_account_settings_users.php'.($show_all ? '?show_all=true' : '')]);
 		if ($option_selected == 'group') {
-			// echo button::create([
-			// 	'type' => 'submit',
-			// 	'value'=> 'add',
-			// 	'label'=> $text['button-add'],
-			// 	'icon' => $settings->get('theme','button_icon_add'),
-			// 	'name' => 'action',
-			// 	'style'=> 'margin-left: 15px;',
-			// 	'on-click'=> "if (confirm('".$text['confirm-update_users']."')) { document.forms.users.submit(); }",
-			// ]);
-			// echo button::create([
-			// 	'type' => 'submit',
-			// 	'value'=> 'remove',
-			// 	'label'=> $text['button-remove'],
-			// 	'icon' => 'fas fa-minus',
-			// 	'name' => 'action',
-			// 	'style'=> 'margin-left: 15px;',
-			// 	'on-click'=> "if (confirm('".$text['confirm-update_users']."')) { document.forms.users.submit(); }",
-			// ]);
 			echo button::create(['label'=>$text['button-add'],'icon'=>$settings->get('theme', 'button_icon_add'),'type'=>'submit','id'=>'btn_add','name'=>'action','value'=>'add','click'=>"if (confirm('".$text['confirm-update_users']."')) { document.forms.users.submit(); }"]);
 			echo button::create(['label'=>$text['button-remove'],'icon'=>$settings->get('theme', 'button_icon_delete'),'type'=>'submit','id'=>'btn_delete','name'=>'action','value'=>'remove','click'=>"if (confirm('".$text['confirm-update_users']."')) { document.forms.users.submit(); }"]);
 		}
@@ -420,6 +457,9 @@
 		echo "<th style='width: 30px; text-align: center; padding: 0px;'><input type='checkbox' id='chk_all' onchange=\"(this.checked) ? check('all') : check('none');\"></th>";
 	}
 	echo th_order_by('username', $text['label-username'], $order_by, $order, null, null, $param);
+	if ($show_all) {
+		echo "<th>Domain</th>\n";
+	}
 	echo th_order_by('user_status', $text['label-user_status'], $order_by, $order, null, null, $param);
 	echo th_order_by('username', $text['label-group'], $order_by, $order, null, null, $param);
 	echo th_order_by('username', $text['label-time_zone'], $order_by, $order, null, null, $param);
@@ -436,9 +476,12 @@
 			echo "	</td>";
 			$user_ids[] = 'checkbox_'.$row['user_uuid'];
 			echo "	<td><a href='".$list_row_url."'>".escape($row['username'])."</a></td>\n";
+			if ($show_all) {
+				echo "	<td>".escape($domain_names[$row['domain_uuid']] ?? $row['domain_uuid'])."</td>\n";
+			}
 			echo "	<td>".escape($row['user_status'])."&nbsp;</td>\n";
 			echo "	<td>";
-				if (count($user_groups[$row['user_uuid']]) > 0) {
+				if (!empty($user_groups[$row['user_uuid']])) {
 					echo implode(', ', $user_groups[$row['user_uuid']]);
 				}
 				echo "&nbsp;</td>\n";
